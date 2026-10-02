@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 _AGENTS = ("cline", "copilot", "kiro", "claude-code", "codex", "antigravity", "pi")
 _MEMORY_TOOL = "mcp-memory"
+_RUN_SETUP_TRACKED_TOOLS = (_MEMORY_TOOL, "cline-hooks")
 
 
 def _get_root_dir() -> Path:
@@ -765,7 +766,7 @@ def main() -> int | None:
         from .install import main as install_main
 
         agent_names = list(_AGENTS) if args.agent == "all" else [args.agent]
-        install_main(agent_names, verbose=args.verbose)
+        size_guard_failed = install_main(agent_names, verbose=args.verbose)
 
         if "claude-code" in agent_names:
             from .install import (
@@ -817,6 +818,9 @@ def main() -> int | None:
                     existing.get("files", []),
                     agent_config=args.agent_config,
                 )
+
+        if size_guard_failed:
+            sys.exit(1)
     elif args.command == "source":
         _print_sources(args.agent)
     elif args.command == "setup":
@@ -847,22 +851,28 @@ def main() -> int | None:
             )
             sys.exit(1)
 
+        from .size_guard import snapshot_sources
+
+        size_baseline = snapshot_sources(_size_guard_roots())
         changed_sources = _pull_local_sources()
 
         from .plugins import pull_plugin_sources
 
         pull_plugin_sources()
 
-        memory_commit = _get_installed_commit(_MEMORY_TOOL)
+        commits_before_setup = {
+            name: _get_installed_commit(name) for name in _RUN_SETUP_TRACKED_TOOLS
+        }
         stale = detect_stale_local_tools()
         if CONFIG_PATH.exists() and (has_remote_sources() or stale):
             run_setup(force_reinstall=stale or None)
-        if _get_installed_commit(_MEMORY_TOOL) != memory_commit:
-            changed_sources.add(_MEMORY_TOOL)
+        for name in _RUN_SETUP_TRACKED_TOOLS:
+            if _get_installed_commit(name) != commits_before_setup[name]:
+                changed_sources.add(name)
 
         from .install import main as install_main
 
-        install_main(list(manifest))
+        size_guard_failed = install_main(list(manifest), size_baseline=size_baseline)
 
         memory_changed = _MEMORY_TOOL in changed_sources
         if changed_sources:
@@ -870,6 +880,9 @@ def main() -> int | None:
         if memory_changed:
             _auto_migrate_memory_db()
             _restart_memory_service()
+
+        if size_guard_failed:
+            sys.exit(1)
     elif args.command == "uninstall":
         from .install import uninstall
 
